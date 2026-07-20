@@ -64,10 +64,32 @@ export default function ChessGame() {
   const [status, setStatus] = useState("Choose a name to get started");
   const [leaderboard, setLeaderboard] = useState<{username:string;rating:number;wins:number}[]>([]);
   const socket = useRef<WebSocket | null>(null);
+  const poller = useRef<ReturnType<typeof setInterval> | null>(null);
   const legal = useMemo(() => selected === null ? [] : targets(board, selected), [board, selected]);
 
   useEffect(() => { fetch("/api/leaderboard").then(r=>r.json()).then(setLeaderboard).catch(()=>{}); }, []);
-  useEffect(() => () => socket.current?.close(), []);
+  useEffect(() => () => { socket.current?.close(); if(poller.current) clearInterval(poller.current); }, []);
+
+  function receiveState(msg: Wire) {
+    const nextPlayers = msg.players as Player[];
+    setPlayers(nextPlayers); setMe(msg.color as Color); setTurn((msg.turn as Color)||"white");
+    if (Array.isArray(msg.moves)) {
+      const next=initialBoard();
+      for(const move of msg.moves as {from:number;to:number}[]) { const p=next[move.from]; next[move.from]=null; next[move.to]=p && (p.type==="p"&&[0,7].includes(Math.floor(move.to/8)))?{...p,type:"q"}:p; }
+      setBoard(next);
+    }
+    setStatus(msg.status === "finished" ? "Game finished" : nextPlayers.length === 2 ? "Game on" : "Waiting for an opponent…");
+  }
+
+  async function connectHosted(code:string) {
+    const payload={action:"join",room:code,username:username.trim()};
+    const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
+    const data=await response.json() as Wire;
+    if(!response.ok) { setStatus(String(data.error||"Couldn’t join this table")); return; }
+    receiveState(data);
+    if(poller.current) clearInterval(poller.current);
+    poller.current=setInterval(async()=>{ try { const r=await fetch(`/api/room?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}`,{cache:"no-store"}); if(r.ok) receiveState(await r.json() as Wire); } catch {} },500);
+  }
 
   function connect(code: string) {
     if (!username.trim()) { setStatus("Enter a username first"); return; }
@@ -77,6 +99,7 @@ export default function ChessGame() {
     setRoom(normalizedCode);
     setStatus("Connecting to the table…");
     const local = ["localhost", "127.0.0.1"].includes(location.hostname);
+    if(!local) { void connectHosted(normalizedCode); return; }
     const socketOrigin = local ? "ws://localhost:8788" : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
     const ws = new WebSocket(`${socketOrigin}/api/socket?room=${encodeURIComponent(normalizedCode)}&username=${encodeURIComponent(username.trim())}`);
     socket.current = ws;
@@ -84,7 +107,7 @@ export default function ChessGame() {
     ws.onmessage = e => {
       const msg = JSON.parse(e.data) as Wire;
       if (msg.type === "state") {
-        setPlayers(msg.players as Player[]); setMe(msg.color as Color); setStatus((msg.players as Player[]).length === 2 ? "Game on" : "Waiting for an opponent…");
+        receiveState(msg);
       }
       if (msg.type === "move") {
         setBoard(b => { const n=[...b], p=n[msg.from as number]; n[msg.from as number]=null; n[msg.to as number]=p && (p.type==="p" && [0,7].includes(Math.floor((msg.to as number)/8))) ? {...p,type:"q"}:p; return n; });
@@ -102,11 +125,14 @@ export default function ChessGame() {
     if (players.length < 2) { setStatus("Waiting for your opponent to join"); return; }
     if (turn !== me) { setStatus("It’s your opponent’s turn"); return; }
     if (selected !== null && legal.includes(i)) {
-      socket.current?.send(JSON.stringify({type:"move",from:selected,to:i})); return;
+      if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"move",from:selected,to:i}));
+      else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"move",room,username:username.trim(),from:selected,to:i})});
+      setSelected(null);
+      return;
     }
     setSelected(board[i]?.color === me ? i : null);
   }
-  function resign() { if(confirm("Resign this game?")) socket.current?.send(JSON.stringify({type:"resign"})); }
+  function resign() { if(confirm("Resign this game?")) { if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"resign"})); else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim()})}); } }
 
   return <main>
     <nav><a className="brand" href="#">CASTLE<span>.</span></a><div className="live"><i/> LIVE MULTIPLAYER</div></nav>

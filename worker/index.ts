@@ -6,7 +6,7 @@ interface Fetcher { fetch(request: Request): Promise<Response> }
 interface D1Result { results?: Record<string, unknown>[] }
 interface D1Prepared { bind(...values: unknown[]): D1Prepared; run(): Promise<unknown>; first<T = Record<string, unknown>>(): Promise<T | null>; all(): Promise<D1Result> }
 interface D1Database { prepare(sql: string): D1Prepared; batch(statements: D1Prepared[]): Promise<unknown> }
-declare class WebSocketPair { 0: WebSocket; 1: WebSocket }
+declare class WebSocketPair { 0: WebSocket; 1: WebSocket & { accept(): void } }
 
 interface Env {
   ASSETS: Fetcher;
@@ -28,7 +28,52 @@ async function ensureDb(env: Env) {
   await env.DB.batch([
     env.DB.prepare("CREATE TABLE IF NOT EXISTS players (username TEXT PRIMARY KEY, rating INTEGER NOT NULL DEFAULT 1200, wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, draws INTEGER NOT NULL DEFAULT 0, games INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, room TEXT NOT NULL, white TEXT NOT NULL, black TEXT NOT NULL, result TEXT NOT NULL, moves TEXT NOT NULL, finished_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS live_rooms (room TEXT PRIMARY KEY, white TEXT NOT NULL, black TEXT, turn TEXT NOT NULL DEFAULT 'white', moves TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'waiting', updated_at INTEGER NOT NULL)"),
   ]);
+}
+
+async function roomState(env: Env, code: string, username: string) {
+  const room = await env.DB.prepare("SELECT room,white,black,turn,moves,status FROM live_rooms WHERE room=?").bind(code).first<{room:string;white:string;black:string|null;turn:"white"|"black";moves:string;status:string}>();
+  if (!room || (username !== room.white && username !== room.black)) return null;
+  const names = [room.white, room.black].filter(Boolean) as string[];
+  const profiles = await Promise.all(names.map(name => env.DB.prepare("SELECT username,rating FROM players WHERE username=?").bind(name).first<{username:string;rating:number}>()));
+  return { type:"state", color: username === room.white ? "white" : "black", turn:room.turn, moves:JSON.parse(room.moves), status:room.status, players:profiles.filter(Boolean).map(profile=>({...profile,color:profile?.username===room.white?"white":"black"})) };
+}
+
+async function roomApi(request: Request, env: Env) {
+  await ensureDb(env);
+  const url = new URL(request.url);
+  const body = request.method === "POST" ? await request.json() as Record<string, unknown> : {};
+  const code = String(body.room || url.searchParams.get("room") || "").toUpperCase().slice(0,6);
+  const username = String(body.username || url.searchParams.get("username") || "").trim().slice(0,20);
+  if (!/^[A-Z0-9]{6}$/.test(code) || !/^[\w -]{2,20}$/.test(username)) return Response.json({error:"Invalid table or username"},{status:400});
+  if (request.method === "GET") {
+    const state = await roomState(env,code,username);
+    return state ? Response.json(state) : Response.json({error:"Table not found"},{status:404});
+  }
+  const action = String(body.action || "join");
+  if (action === "join") {
+    await player(env,username);
+    await env.DB.prepare("INSERT OR IGNORE INTO live_rooms (room,white,updated_at) VALUES (?,?,?)").bind(code,username,Date.now()).run();
+    let state = await roomState(env,code,username);
+    if (!state) {
+      await env.DB.prepare("UPDATE live_rooms SET black=?,status='playing',updated_at=? WHERE room=? AND black IS NULL AND white<>?").bind(username,Date.now(),code,username).run();
+      state = await roomState(env,code,username);
+    }
+    return state ? Response.json(state) : Response.json({error:"Table is full"},{status:409});
+  }
+  const current = await roomState(env,code,username);
+  if (!current) return Response.json({error:"Table not found"},{status:404});
+  if (action === "move") {
+    if (current.players.length < 2 || current.status !== "playing" || current.color !== current.turn) return Response.json({error:"Move rejected"},{status:409});
+    const from=Number(body.from),to=Number(body.to);
+    if(!Number.isInteger(from)||!Number.isInteger(to)||from<0||from>63||to<0||to>63) return Response.json({error:"Invalid move"},{status:400});
+    const moves=[...current.moves,{from,to}], next=current.turn==="white"?"black":"white";
+    await env.DB.prepare("UPDATE live_rooms SET moves=?,turn=?,updated_at=? WHERE room=? AND turn=?").bind(JSON.stringify(moves),next,Date.now(),code,current.turn).run();
+  } else if (action === "resign") {
+    await env.DB.prepare("UPDATE live_rooms SET status='finished',updated_at=? WHERE room=?").bind(Date.now(),code).run();
+  }
+  return Response.json(await roomState(env,code,username));
 }
 
 async function player(env: Env, username: string) {
@@ -81,6 +126,7 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/socket") return socket(request, env);
+    if (url.pathname === "/api/room") return roomApi(request, env);
     if (url.pathname === "/api/leaderboard") {
       await ensureDb(env);
       const rows = await env.DB.prepare("SELECT username,rating,wins FROM players ORDER BY rating DESC,wins DESC LIMIT 10").all();

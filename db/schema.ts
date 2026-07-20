@@ -22,3 +22,13 @@ export const games = sqliteTable("games", {
   moves: text("moves").notNull(),
   finishedAt: integer("finished_at").notNull(),
 });
+
+export const liveRooms = sqliteTable("live_rooms", {
+  room: text("room").primaryKey(),
+  white: text("white").notNull(),
+  black: text("black"),
+  turn: text("turn").notNull().default("white"),
+  moves: text("moves").notNull().default("[]"),
+  status: text("status").notNull().default("waiting"),
+  updatedAt: integer("updated_at").notNull(),
+});
