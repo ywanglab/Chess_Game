@@ -71,11 +71,16 @@ export default function ChessGame() {
 
   function connect(code: string) {
     if (!username.trim()) { setStatus("Enter a username first"); return; }
+    const normalizedCode = code.trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(normalizedCode)) { setStatus("Enter the complete 6-character table code"); return; }
+    socket.current?.close();
+    setRoom(normalizedCode);
+    setStatus("Connecting to the table…");
     const local = ["localhost", "127.0.0.1"].includes(location.hostname);
     const socketOrigin = local ? "ws://localhost:8788" : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
-    const ws = new WebSocket(`${socketOrigin}/api/socket?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}`);
+    const ws = new WebSocket(`${socketOrigin}/api/socket?room=${encodeURIComponent(normalizedCode)}&username=${encodeURIComponent(username.trim())}`);
     socket.current = ws;
-    ws.onopen = () => { setRoom(code); setStatus("Waiting for an opponent…"); };
+    ws.onopen = () => setStatus("Waiting for an opponent…");
     ws.onmessage = e => {
       const msg = JSON.parse(e.data) as Wire;
       if (msg.type === "state") {
