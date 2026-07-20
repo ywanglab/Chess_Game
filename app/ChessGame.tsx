@@ -66,6 +66,7 @@ export default function ChessGame() {
   const socket = useRef<WebSocket | null>(null);
   const poller = useRef<ReturnType<typeof setInterval> | null>(null);
   const dragFrom = useRef<number | null>(null);
+  const clientId = useRef(typeof crypto !== "undefined" ? crypto.randomUUID() : Math.random().toString(36).slice(2));
   const legal = useMemo(() => selected === null ? [] : targets(board, selected), [board, selected]);
 
   useEffect(() => { fetch("/api/leaderboard").then(r=>r.json()).then(setLeaderboard).catch(()=>{}); }, []);
@@ -83,13 +84,13 @@ export default function ChessGame() {
   }
 
   async function connectHosted(code:string) {
-    const payload={action:"join",room:code,username:username.trim()};
+    const payload={action:"join",room:code,username:username.trim(),clientId:clientId.current};
     const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
     const data=await response.json() as Wire;
     if(!response.ok) { setStatus(String(data.error||"Couldn’t join this table")); return; }
     receiveState(data);
     if(poller.current) clearInterval(poller.current);
-    poller.current=setInterval(async()=>{ try { const r=await fetch(`/api/room?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}`,{cache:"no-store"}); if(r.ok) receiveState(await r.json() as Wire); } catch {} },500);
+    poller.current=setInterval(async()=>{ try { const r=await fetch(`/api/room?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}&clientId=${encodeURIComponent(clientId.current)}`,{cache:"no-store"}); if(r.ok) receiveState(await r.json() as Wire); } catch {} },500);
   }
 
   function connect(code: string) {
@@ -127,7 +128,7 @@ export default function ChessGame() {
     setSelected(null); setTurn(me === "white" ? "black" : "white"); setStatus("Move sent…");
     if(["localhost","127.0.0.1"].includes(location.hostname)) { socket.current?.send(JSON.stringify({type:"move",from,to})); return; }
     try {
-      const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"move",room,username:username.trim(),from,to})});
+      const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"move",room,username:username.trim(),clientId:clientId.current,from,to})});
       const data=await response.json() as Wire;
       if(!response.ok) { setBoard(current=>{const next=[...current];next[from]=moving;next[to]=board[to];return next;}); setTurn(me||"white"); setStatus(String(data.error||"That move was rejected")); return; }
       receiveState(data);
@@ -148,7 +149,7 @@ export default function ChessGame() {
     if(from!==null&&turn===me&&targets(board,from).includes(to)) void submitMove(from,to);
     else setStatus("That piece can’t move there");
   }
-  function resign() { if(confirm("Resign this game?")) { if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"resign"})); else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim()})}); } }
+  function resign() { if(confirm("Resign this game?")) { if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"resign"})); else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim(),clientId:clientId.current})}); } }
 
   return <main>
     <nav><a className="brand" href="#">CASTLE<span>.</span></a><div className="live"><i/> LIVE MULTIPLAYER</div></nav>

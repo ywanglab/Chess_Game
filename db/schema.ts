@@ -26,7 +26,9 @@ export const games = sqliteTable("games", {
 export const liveRooms = sqliteTable("live_rooms", {
   room: text("room").primaryKey(),
   white: text("white").notNull(),
+  whiteId: text("white_id"),
   black: text("black"),
+  blackId: text("black_id"),
   turn: text("turn").notNull().default("white"),
   moves: text("moves").notNull().default("[]"),
   status: text("status").notNull().default("waiting"),

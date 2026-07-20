@@ -15,6 +15,13 @@
       "when": 1784570589544,
       "tag": "0001_pretty_kree",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784572684357,
+      "tag": "0002_flawless_bishop",
+      "breakpoints": true
     }
   ]
 }

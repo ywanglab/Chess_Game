@@ -28,16 +28,17 @@ async function ensureDb(env: Env) {
   await env.DB.batch([
     env.DB.prepare("CREATE TABLE IF NOT EXISTS players (username TEXT PRIMARY KEY, rating INTEGER NOT NULL DEFAULT 1200, wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, draws INTEGER NOT NULL DEFAULT 0, games INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, room TEXT NOT NULL, white TEXT NOT NULL, black TEXT NOT NULL, result TEXT NOT NULL, moves TEXT NOT NULL, finished_at INTEGER NOT NULL)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS live_rooms (room TEXT PRIMARY KEY, white TEXT NOT NULL, black TEXT, turn TEXT NOT NULL DEFAULT 'white', moves TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'waiting', updated_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS live_rooms (room TEXT PRIMARY KEY, white TEXT NOT NULL, white_id TEXT, black TEXT, black_id TEXT, turn TEXT NOT NULL DEFAULT 'white', moves TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'waiting', updated_at INTEGER NOT NULL)"),
   ]);
 }
 
-async function roomState(env: Env, code: string, username: string) {
-  const room = await env.DB.prepare("SELECT room,white,black,turn,moves,status FROM live_rooms WHERE room=?").bind(code).first<{room:string;white:string;black:string|null;turn:"white"|"black";moves:string;status:string}>();
-  if (!room || (username !== room.white && username !== room.black)) return null;
+async function roomState(env: Env, code: string, clientId: string) {
+  const room = await env.DB.prepare("SELECT room,white,white_id,black,black_id,turn,moves,status FROM live_rooms WHERE room=?").bind(code).first<{room:string;white:string;white_id:string|null;black:string|null;black_id:string|null;turn:"white"|"black";moves:string;status:string}>();
+  if (!room || (clientId !== room.white_id && clientId !== room.black_id)) return null;
   const names = [room.white, room.black].filter(Boolean) as string[];
   const profiles = await Promise.all(names.map(name => env.DB.prepare("SELECT username,rating FROM players WHERE username=?").bind(name).first<{username:string;rating:number}>()));
-  return { type:"state", color: username === room.white ? "white" : "black", turn:room.turn, moves:JSON.parse(room.moves), status:room.status, players:profiles.filter(Boolean).map(profile=>({...profile,color:profile?.username===room.white?"white":"black"})) };
+  const players = profiles.filter(Boolean).map((profile,index)=>({...profile,color:index===0?"white":"black"}));
+  return { type:"state", color: clientId === room.white_id ? "white" : "black", turn:room.turn, moves:JSON.parse(room.moves), status:room.status, players };
 }
 
 async function roomApi(request: Request, env: Env) {
@@ -46,23 +47,24 @@ async function roomApi(request: Request, env: Env) {
   const body = request.method === "POST" ? await request.json() as Record<string, unknown> : {};
   const code = String(body.room || url.searchParams.get("room") || "").toUpperCase().slice(0,6);
   const username = String(body.username || url.searchParams.get("username") || "").trim().slice(0,20);
-  if (!/^[A-Z0-9]{6}$/.test(code) || !/^[\w -]{2,20}$/.test(username)) return Response.json({error:"Invalid table or username"},{status:400});
+  const clientId = String(body.clientId || url.searchParams.get("clientId") || "").slice(0,64);
+  if (!/^[A-Z0-9]{6}$/.test(code) || !/^[\w -]{2,20}$/.test(username) || !/^[a-zA-Z0-9-]{8,64}$/.test(clientId)) return Response.json({error:"Invalid table or player"},{status:400});
   if (request.method === "GET") {
-    const state = await roomState(env,code,username);
+    const state = await roomState(env,code,clientId);
     return state ? Response.json(state) : Response.json({error:"Table not found"},{status:404});
   }
   const action = String(body.action || "join");
   if (action === "join") {
     await player(env,username);
-    await env.DB.prepare("INSERT OR IGNORE INTO live_rooms (room,white,updated_at) VALUES (?,?,?)").bind(code,username,Date.now()).run();
-    let state = await roomState(env,code,username);
+    await env.DB.prepare("INSERT OR IGNORE INTO live_rooms (room,white,white_id,updated_at) VALUES (?,?,?,?)").bind(code,username,clientId,Date.now()).run();
+    let state = await roomState(env,code,clientId);
     if (!state) {
-      await env.DB.prepare("UPDATE live_rooms SET black=?,status='playing',updated_at=? WHERE room=? AND black IS NULL AND white<>?").bind(username,Date.now(),code,username).run();
-      state = await roomState(env,code,username);
+      await env.DB.prepare("UPDATE live_rooms SET black=?,black_id=?,status='playing',updated_at=? WHERE room=? AND black_id IS NULL AND white_id<>?").bind(username,clientId,Date.now(),code,clientId).run();
+      state = await roomState(env,code,clientId);
     }
     return state ? Response.json(state) : Response.json({error:"Table is full"},{status:409});
   }
-  const current = await roomState(env,code,username);
+  const current = await roomState(env,code,clientId);
   if (!current) return Response.json({error:"Table not found"},{status:404});
   if (action === "move") {
     if (current.status === "finished" || current.color !== current.turn) return Response.json({error:"Move rejected"},{status:409});
@@ -73,7 +75,7 @@ async function roomApi(request: Request, env: Env) {
   } else if (action === "resign") {
     await env.DB.prepare("UPDATE live_rooms SET status='finished',updated_at=? WHERE room=?").bind(Date.now(),code).run();
   }
-  return Response.json(await roomState(env,code,username));
+  return Response.json(await roomState(env,code,clientId));
 }
 
 async function player(env: Env, username: string) {
