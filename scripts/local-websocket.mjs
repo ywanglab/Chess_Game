@@ -28,7 +28,7 @@ wss.on("connection", (ws, request) => {
   ws.on("message", raw => {
     try {
       const message = JSON.parse(raw.toString());
-      if (message.type === "move" && room.players.length === 2 && !room.finished && player.color === room.turn) {
+      if (message.type === "move" && !room.finished && player.color === room.turn) {
         room.turn = room.turn === "white" ? "black" : "white";
         const event = JSON.stringify({ type: "move", from: message.from, to: message.to, turn: room.turn });
         room.players.forEach(item => item.ws.send(event));

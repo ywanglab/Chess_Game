@@ -65,6 +65,7 @@ export default function ChessGame() {
   const [leaderboard, setLeaderboard] = useState<{username:string;rating:number;wins:number}[]>([]);
   const socket = useRef<WebSocket | null>(null);
   const poller = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dragFrom = useRef<number | null>(null);
   const legal = useMemo(() => selected === null ? [] : targets(board, selected), [board, selected]);
 
   useEffect(() => { fetch("/api/leaderboard").then(r=>r.json()).then(setLeaderboard).catch(()=>{}); }, []);
@@ -134,7 +135,6 @@ export default function ChessGame() {
   }
   function clickSquare(i:number) {
     if (!me) { setStatus("The live connection is not ready yet"); return; }
-    if (players.length < 2) { setStatus("Waiting for your opponent to join"); return; }
     if (turn !== me) { setStatus("It’s your opponent’s turn"); return; }
     if (selected !== null && legal.includes(i)) {
       void submitMove(selected,i);
@@ -142,6 +142,11 @@ export default function ChessGame() {
     }
     if(board[i]?.color === me) { setSelected(i); setStatus("Piece selected · choose a highlighted square"); }
     else setSelected(null);
+  }
+  function dropPiece(to:number) {
+    const from=dragFrom.current; dragFrom.current=null;
+    if(from!==null&&turn===me&&targets(board,from).includes(to)) void submitMove(from,to);
+    else setStatus("That piece can’t move there");
   }
   function resign() { if(confirm("Resign this game?")) { if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"resign"})); else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim()})}); } }
 
@@ -157,7 +162,7 @@ export default function ChessGame() {
       </section> : <section className="game-layout">
         <div className="board-wrap">
           <div className="playerline"><div className="avatar">{players.find(p=>p.color==="black")?.username?.[0]?.toUpperCase()||"?"}</div><div><strong>{players.find(p=>p.color==="black")?.username||"Waiting…"}</strong><small>{players.find(p=>p.color==="black")?.rating||1200}</small></div>{turn==="black"&&<span className="turn">THINKING</span>}</div>
-          <div className="board" role="grid" aria-label="Chess board">{board.map((p,i)=><button aria-label={`square ${i}`} key={i} onClick={()=>clickSquare(i)} className={`${(Math.floor(i/8)+i)%2?"dark":"light"} ${selected===i?"selected":""} ${legal.includes(i)?"target":""}`}><span>{p?glyph[p.color+p.type]:""}</span></button>)}</div>
+          <div className="board" role="grid" aria-label="Chess board">{board.map((p,i)=><button aria-label={`square ${i}`} key={i} draggable={Boolean(p&&p.color===me&&turn===me)} onDragStart={()=>{dragFrom.current=i;setSelected(i);}} onDragOver={e=>e.preventDefault()} onDrop={()=>dropPiece(i)} onClick={()=>clickSquare(i)} className={`${(Math.floor(i/8)+i)%2?"dark":"light"} ${selected===i?"selected":""} ${legal.includes(i)?"target":""}`}><span>{p?glyph[p.color+p.type]:""}</span></button>)}</div>
           <div className="playerline"><div className="avatar mine">{username[0]?.toUpperCase()}</div><div><strong>{username} {me&&<em>YOU · {me.toUpperCase()}</em>}</strong><small>{players.find(p=>p.color===me)?.rating||1200}</small></div>{turn===me&&<span className="turn">YOUR TURN</span>}</div>
         </div>
         <aside><div className="code"><small>TABLE CODE</small><strong>{room}</strong><button onClick={()=>navigator.clipboard.writeText(room)}>COPY</button></div><div className="panel"><h3>Game status</h3><p>{status}</p><p>{turn === me ? "Take your time. Your clock isn't running in the MVP." : "Your opponent is on the move."}</p></div><button className="resign" onClick={resign}>Resign game</button></aside>

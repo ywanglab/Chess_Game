@@ -65,7 +65,7 @@ async function roomApi(request: Request, env: Env) {
   const current = await roomState(env,code,username);
   if (!current) return Response.json({error:"Table not found"},{status:404});
   if (action === "move") {
-    if (current.players.length < 2 || current.status !== "playing" || current.color !== current.turn) return Response.json({error:"Move rejected"},{status:409});
+    if (current.status === "finished" || current.color !== current.turn) return Response.json({error:"Move rejected"},{status:409});
     const from=Number(body.from),to=Number(body.to);
     if(!Number.isInteger(from)||!Number.isInteger(to)||from<0||from>63||to<0||to>63) return Response.json({error:"Invalid move"},{status:400});
     const moves=[...current.moves,{from,to}], next=current.turn==="white"?"black":"white";
