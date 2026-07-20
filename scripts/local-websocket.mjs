@@ -8,6 +8,7 @@ function state(room) {
     player.ws.send(JSON.stringify({
       type: "state",
       color: player.color,
+      turn: room.turn,
       players: room.players.map(({ username, color }) => ({ username, color, rating: 1200 })),
     }));
   }
