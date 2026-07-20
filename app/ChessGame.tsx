@@ -1,0 +1,123 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+type Color = "white" | "black";
+type Piece = { type: string; color: Color } | null;
+type Player = { username: string; rating: number; color: Color };
+type Wire = { type: string; [key: string]: unknown };
+
+const glyph: Record<string, string> = {
+  whitek: "♔", whiteq: "♕", whiter: "♖", whiteb: "♗", whiten: "♘", whitep: "♙",
+  blackk: "♚", blackq: "♛", blackr: "♜", blackb: "♝", blackn: "♞", blackp: "♟",
+};
+
+function initialBoard(): Piece[] {
+  const back = ["r", "n", "b", "q", "k", "b", "n", "r"];
+  return Array.from({ length: 64 }, (_, i) => {
+    const row = Math.floor(i / 8), col = i % 8;
+    if (row === 0) return { type: back[col], color: "black" };
+    if (row === 1) return { type: "p", color: "black" };
+    if (row === 6) return { type: "p", color: "white" };
+    if (row === 7) return { type: back[col], color: "white" };
+    return null;
+  });
+}
+
+function targets(board: Piece[], from: number): number[] {
+  const p = board[from]; if (!p) return [];
+  const r = Math.floor(from / 8), c = from % 8, out: number[] = [];
+  const add = (rr: number, cc: number) => {
+    if (rr < 0 || rr > 7 || cc < 0 || cc > 7) return false;
+    const at = rr * 8 + cc;
+    if (!board[at]) { out.push(at); return true; }
+    if (board[at]?.color !== p.color) out.push(at);
+    return false;
+  };
+  if (p.type === "p") {
+    const d = p.color === "white" ? -1 : 1, start = p.color === "white" ? 6 : 1;
+    if (!board[(r + d) * 8 + c]) {
+      out.push((r + d) * 8 + c);
+      if (r === start && !board[(r + 2 * d) * 8 + c]) out.push((r + 2 * d) * 8 + c);
+    }
+    for (const dc of [-1, 1]) { const rr = r + d, cc = c + dc; if (rr >= 0 && rr < 8 && cc >= 0 && cc < 8 && board[rr * 8 + cc]?.color !== p.color && board[rr * 8 + cc]) out.push(rr * 8 + cc); }
+  } else if (p.type === "n") {
+    for (const [dr, dc] of [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]]) add(r+dr,c+dc);
+  } else if (p.type === "k") {
+    for (let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++) if(dr||dc) add(r+dr,c+dc);
+  } else {
+    const dirs = p.type === "b" ? [[-1,-1],[-1,1],[1,-1],[1,1]] : p.type === "r" ? [[-1,0],[1,0],[0,-1],[0,1]] : [[-1,-1],[-1,1],[1,-1],[1,1],[-1,0],[1,0],[0,-1],[0,1]];
+    for (const [dr,dc] of dirs) for(let n=1;n<8;n++) if(!add(r+dr*n,c+dc*n)) break;
+  }
+  return out;
+}
+
+export default function ChessGame() {
+  const [username, setUsername] = useState("");
+  const [roomInput, setRoomInput] = useState("");
+  const [room, setRoom] = useState("");
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [board, setBoard] = useState<Piece[]>(initialBoard);
+  const [turn, setTurn] = useState<Color>("white");
+  const [me, setMe] = useState<Color | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [status, setStatus] = useState("Choose a name to get started");
+  const [leaderboard, setLeaderboard] = useState<{username:string;rating:number;wins:number}[]>([]);
+  const socket = useRef<WebSocket | null>(null);
+  const legal = useMemo(() => selected === null ? [] : targets(board, selected), [board, selected]);
+
+  useEffect(() => { fetch("/api/leaderboard").then(r=>r.json()).then(setLeaderboard).catch(()=>{}); }, []);
+  useEffect(() => () => socket.current?.close(), []);
+
+  function connect(code: string) {
+    if (!username.trim()) { setStatus("Enter a username first"); return; }
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${protocol}//${location.host}/api/socket?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}`);
+    socket.current = ws;
+    ws.onopen = () => { setRoom(code); setStatus("Waiting for an opponent…"); };
+    ws.onmessage = e => {
+      const msg = JSON.parse(e.data) as Wire;
+      if (msg.type === "state") {
+        setPlayers(msg.players as Player[]); setMe(msg.color as Color); setStatus((msg.players as Player[]).length === 2 ? "Game on" : "Waiting for an opponent…");
+      }
+      if (msg.type === "move") {
+        setBoard(b => { const n=[...b], p=n[msg.from as number]; n[msg.from as number]=null; n[msg.to as number]=p && (p.type==="p" && [0,7].includes(Math.floor((msg.to as number)/8))) ? {...p,type:"q"}:p; return n; });
+        setTurn(msg.turn as Color); setSelected(null);
+      }
+      if (msg.type === "notice") setStatus(msg.message as string);
+      if (msg.type === "reset") { setBoard(initialBoard()); setTurn("white"); }
+    };
+    ws.onerror = () => setStatus("Couldn’t connect. Try again.");
+    ws.onclose = () => setStatus("Table disconnected");
+  }
+  function createRoom() { connect(Math.random().toString(36).slice(2,8).toUpperCase()); }
+  function clickSquare(i:number) {
+    if (!me || players.length < 2 || turn !== me) return;
+    if (selected !== null && legal.includes(i)) {
+      socket.current?.send(JSON.stringify({type:"move",from:selected,to:i})); return;
+    }
+    setSelected(board[i]?.color === me ? i : null);
+  }
+  function resign() { if(confirm("Resign this game?")) socket.current?.send(JSON.stringify({type:"resign"})); }
+
+  return <main>
+    <nav><a className="brand" href="#">CASTLE<span>.</span></a><div className="live"><i/> LIVE MULTIPLAYER</div></nav>
+    <section className="shell">
+      <header><p className="eyebrow">A BETTER WAY TO PLAY</p><h1>Your move.</h1><p className="dek">No accounts. No clutter. Just share a table code and play a proper game of chess.</p></header>
+      {!room ? <section className="lobby">
+        <div className="start-card"><label>YOUR PLAYER NAME</label><input value={username} onChange={e=>setUsername(e.target.value)} placeholder="e.g. knightowl" maxLength={20}/><button onClick={createRoom}>Create a table <b>→</b></button></div>
+        <div className="or"><span/>OR JOIN A FRIEND<span/></div>
+        <div className="join"><input value={roomInput} onChange={e=>setRoomInput(e.target.value.toUpperCase())} placeholder="TABLE CODE" maxLength={6}/><button onClick={()=>connect(roomInput)}>Join table</button></div>
+        <p className="status">{status}</p>
+      </section> : <section className="game-layout">
+        <div className="board-wrap">
+          <div className="playerline"><div className="avatar">{players.find(p=>p.color==="black")?.username?.[0]?.toUpperCase()||"?"}</div><div><strong>{players.find(p=>p.color==="black")?.username||"Waiting…"}</strong><small>{players.find(p=>p.color==="black")?.rating||1200}</small></div>{turn==="black"&&<span className="turn">THINKING</span>}</div>
+          <div className="board" role="grid" aria-label="Chess board">{board.map((p,i)=><button aria-label={`square ${i}`} key={i} onClick={()=>clickSquare(i)} className={`${(Math.floor(i/8)+i)%2?"dark":"light"} ${selected===i?"selected":""} ${legal.includes(i)?"target":""}`}><span>{p?glyph[p.color+p.type]:""}</span></button>)}</div>
+          <div className="playerline"><div className="avatar mine">{username[0]?.toUpperCase()}</div><div><strong>{username} {me&&<em>YOU · {me.toUpperCase()}</em>}</strong><small>{players.find(p=>p.color===me)?.rating||1200}</small></div>{turn===me&&<span className="turn">YOUR TURN</span>}</div>
+        </div>
+        <aside><div className="code"><small>TABLE CODE</small><strong>{room}</strong><button onClick={()=>navigator.clipboard.writeText(room)}>COPY</button></div><div className="panel"><h3>Game status</h3><p>{status}</p><p>{turn === me ? "Take your time. Your clock isn't running in the MVP." : "Your opponent is on the move."}</p></div><button className="resign" onClick={resign}>Resign game</button></aside>
+      </section>}
+      <section className="leaders"><div><p className="eyebrow">THE CLUB</p><h2>Top players</h2></div><ol>{leaderboard.length?leaderboard.slice(0,5).map((p,i)=><li key={p.username}><span>{String(i+1).padStart(2,"0")}</span><strong>{p.username}</strong><small>{p.wins} wins</small><b>{p.rating}</b></li>):<li className="empty">Finish the first game to start the leaderboard.</li>}</ol></section>
+    </section><footer><span>CASTLE CHESS · MVP</span><span>Built for friendly rivalry.</span></footer>
+  </main>;
+}
