@@ -82,6 +82,7 @@ export default function ChessGame() {
   const confirmedMoveCount = useRef(0);
   const pendingMove = useRef<{from:number;to:number;base:number}|null>(null);
   const selectedRef = useRef<number | null>(null);
+  const usingHostedConnection = useRef(false);
   const legal = useMemo(() => selected === null ? [] : targets(board, selected), [board, selected]);
 
   useEffect(() => { fetch("/api/leaderboard").then(r=>r.json()).then(setLeaderboard).catch(()=>{}); }, []);
@@ -114,6 +115,7 @@ export default function ChessGame() {
   }
 
   async function connectHosted(code:string) {
+    usingHostedConnection.current=true;
     const payload={action:"join",room:code,username:username.trim(),clientId:clientId.current};
     const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
     const data=await response.json() as Wire;
@@ -123,12 +125,13 @@ export default function ChessGame() {
     poller.current=setInterval(async()=>{ try { const r=await fetch(`/api/room?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}&clientId=${encodeURIComponent(clientId.current)}`,{cache:"no-store"}); if(r.ok) receiveState(await r.json() as Wire); } catch {} },500);
   }
 
-  function connect(code: string) {
+  function connect(code: string, expectedColor: Color) {
     if (!username.trim()) { setStatus("Enter a username first"); return; }
     const normalizedCode = code.trim().toUpperCase();
     if (!/^[A-Z0-9]{6}$/.test(normalizedCode)) { setStatus("Enter the complete 6-character table code"); return; }
     socket.current?.close();
-    pendingMove.current=null; confirmedMoveCount.current=0; setBoard(initialBoard()); setTurn("white"); setPlayers([]); setMe(null); selectSquare(null); setHistory([]); setResult(null);
+    usingHostedConnection.current=false;
+    pendingMove.current=null; confirmedMoveCount.current=0; setBoard(initialBoard()); setTurn("white"); setPlayers([{username:username.trim(),rating:1200,color:expectedColor}]); setMe(expectedColor); selectSquare(null); setHistory([]); setResult(null);
     setRoom(normalizedCode);
     setStatus("Connecting to the table…");
     const local = ["localhost", "127.0.0.1"].includes(location.hostname);
@@ -136,10 +139,13 @@ export default function ChessGame() {
     const socketOrigin = local ? "ws://localhost:8788" : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
     const ws = new WebSocket(`${socketOrigin}/api/socket?room=${encodeURIComponent(normalizedCode)}&username=${encodeURIComponent(username.trim())}`);
     socket.current = ws;
+    let receivedState=false, fallbackStarted=false;
+    const usePollingFallback=()=>{if(receivedState||fallbackStarted)return;fallbackStarted=true;socket.current=null;setStatus("Live connection unavailable · switching connection mode…");void connectHosted(normalizedCode);};
     ws.onopen = () => setStatus("Waiting for an opponent…");
     ws.onmessage = e => {
       const msg = JSON.parse(e.data) as Wire;
       if (msg.type === "state") {
+        receivedState=true;
         receiveState(msg);
       }
       if (msg.type === "move") {
@@ -152,20 +158,20 @@ export default function ChessGame() {
       if (msg.type === "notice") setStatus(msg.message as string);
       if (msg.type === "reset") { setBoard(initialBoard()); setTurn("white"); }
     };
-    ws.onerror = () => setStatus("Live connection failed. Restart with npm run dev, then refresh this page.");
-    ws.onclose = () => setStatus("Table disconnected");
+    ws.onerror = usePollingFallback;
+    ws.onclose = () => { if(receivedState)setStatus("Table disconnected"); else usePollingFallback(); };
   }
-  function createRoom() { connect(Math.random().toString(36).slice(2,8).toUpperCase()); }
+  function createRoom() { connect(Math.random().toString(36).slice(2,8).toUpperCase(),"white"); }
   async function submitMove(from:number,to:number) {
     const moving=board[from];
-    if (["localhost", "127.0.0.1"].includes(location.hostname) && socket.current?.readyState !== WebSocket.OPEN) {
+    if (["localhost", "127.0.0.1"].includes(location.hostname) && !usingHostedConnection.current && socket.current?.readyState !== WebSocket.OPEN) {
       setStatus("The live connection is not ready. Please wait a moment and try again.");
       return;
     }
     pendingMove.current={from,to,base:confirmedMoveCount.current};
     setBoard(current=>{const next=[...current],piece=next[from];next[from]=null;next[to]=piece&&piece.type==="p"&&[0,7].includes(Math.floor(to/8))?{...piece,type:"q"}:piece;return next;});
     setHistory(items=>[...items,{from,to}]); selectSquare(null); setTurn(me === "white" ? "black" : "white"); setStatus("Move sent…");
-    if(["localhost","127.0.0.1"].includes(location.hostname)) { socket.current?.send(JSON.stringify({type:"move",from,to})); return; }
+    if(["localhost","127.0.0.1"].includes(location.hostname)&&!usingHostedConnection.current) { socket.current?.send(JSON.stringify({type:"move",from,to})); return; }
     try {
       const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"move",room,username:username.trim(),clientId:clientId.current,from,to})});
       const data=await response.json() as Wire;
@@ -189,12 +195,12 @@ export default function ChessGame() {
     if(from!==null&&turn===me&&targets(board,from).includes(to)) void submitMove(from,to);
     else setStatus("That piece can’t move there");
   }
-  async function resign() { if(result||!confirm("Resign this game?")) return; if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"resign"})); else { const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim(),clientId:clientId.current})}); const data=await response.json() as Wire; if(response.ok) receiveState(data); else setStatus(String(data.error||"Could not resign the game")); } }
+  async function resign() { if(result||!confirm("Resign this game?")) return; if(["localhost","127.0.0.1"].includes(location.hostname)&&!usingHostedConnection.current) socket.current?.send(JSON.stringify({type:"resign"})); else { const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim(),clientId:clientId.current})}); const data=await response.json() as Wire; if(response.ok) receiveState(data); else setStatus(String(data.error||"Could not resign the game")); } }
 
   function chooseTheme(next:"light"|"dark") { setTheme(next); localStorage.setItem("castle-theme",next); }
   function chooseBoard(next:"forest"|"classic"|"midnight") { setBoardColor(next); localStorage.setItem("castle-board",next); }
-  const whitePlayer=players.find(player=>player.color==="white")??players[0];
-  const blackPlayer=players.find(player=>player.color==="black")??players[1];
+  const whitePlayer=players.find(player=>player.color==="white");
+  const blackPlayer=players.find(player=>player.color==="black");
   const recentMoves=history.slice(-5), recentStart=history.length-recentMoves.length;
 
   return <main data-theme={theme} data-board={boardColor}>
@@ -205,7 +211,7 @@ export default function ChessGame() {
       {!room ? <section className="lobby">
         <div className="start-card"><label>YOUR PLAYER NAME</label><input value={username} onChange={e=>setUsername(e.target.value)} placeholder="e.g. knightowl" maxLength={20}/><button onClick={createRoom}>Create a table <b>→</b></button></div>
         <div className="or"><span/>OR JOIN A FRIEND<span/></div>
-        <div className="join"><input value={roomInput} onChange={e=>setRoomInput(e.target.value.toUpperCase())} placeholder="TABLE CODE" maxLength={6}/><button onClick={()=>connect(roomInput)}>Join table</button></div>
+        <div className="join"><input value={roomInput} onChange={e=>setRoomInput(e.target.value.toUpperCase())} placeholder="TABLE CODE" maxLength={6}/><button onClick={()=>connect(roomInput,"black")}>Join table</button></div>
         <p className="status">{status}</p>
       </section> : <section className="game-layout">
         <div className="board-wrap">
