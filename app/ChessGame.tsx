@@ -78,7 +78,7 @@ export default function ChessGame() {
       for(const move of msg.moves as {from:number;to:number}[]) { const p=next[move.from]; next[move.from]=null; next[move.to]=p && (p.type==="p"&&[0,7].includes(Math.floor(move.to/8)))?{...p,type:"q"}:p; }
       setBoard(next);
     }
-    setStatus(msg.status === "finished" ? "Game finished" : nextPlayers.length === 2 ? "Game on" : "Waiting for an opponent…");
+    setStatus(msg.status === "finished" ? "Game finished" : nextPlayers.length === 2 ? `${msg.turn === msg.color ? "Your turn" : "Opponent’s turn"} · ${String(msg.turn||"white").toUpperCase()} to move` : "Waiting for an opponent…");
   }
 
   async function connectHosted(code:string) {
@@ -120,17 +120,28 @@ export default function ChessGame() {
     ws.onclose = () => setStatus("Table disconnected");
   }
   function createRoom() { connect(Math.random().toString(36).slice(2,8).toUpperCase()); }
+  async function submitMove(from:number,to:number) {
+    const moving=board[from];
+    setBoard(current=>{const next=[...current],piece=next[from];next[from]=null;next[to]=piece&&piece.type==="p"&&[0,7].includes(Math.floor(to/8))?{...piece,type:"q"}:piece;return next;});
+    setSelected(null); setTurn(me === "white" ? "black" : "white"); setStatus("Move sent…");
+    if(["localhost","127.0.0.1"].includes(location.hostname)) { socket.current?.send(JSON.stringify({type:"move",from,to})); return; }
+    try {
+      const response=await fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"move",room,username:username.trim(),from,to})});
+      const data=await response.json() as Wire;
+      if(!response.ok) { setBoard(current=>{const next=[...current];next[from]=moving;next[to]=board[to];return next;}); setTurn(me||"white"); setStatus(String(data.error||"That move was rejected")); return; }
+      receiveState(data);
+    } catch { setStatus("The move could not reach the table. Please try again."); }
+  }
   function clickSquare(i:number) {
     if (!me) { setStatus("The live connection is not ready yet"); return; }
     if (players.length < 2) { setStatus("Waiting for your opponent to join"); return; }
     if (turn !== me) { setStatus("It’s your opponent’s turn"); return; }
     if (selected !== null && legal.includes(i)) {
-      if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"move",from:selected,to:i}));
-      else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"move",room,username:username.trim(),from:selected,to:i})});
-      setSelected(null);
+      void submitMove(selected,i);
       return;
     }
-    setSelected(board[i]?.color === me ? i : null);
+    if(board[i]?.color === me) { setSelected(i); setStatus("Piece selected · choose a highlighted square"); }
+    else setSelected(null);
   }
   function resign() { if(confirm("Resign this game?")) { if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"resign"})); else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim()})}); } }
 
