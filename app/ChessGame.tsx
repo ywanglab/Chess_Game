@@ -71,8 +71,9 @@ export default function ChessGame() {
 
   function connect(code: string) {
     if (!username.trim()) { setStatus("Enter a username first"); return; }
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${location.host}/api/socket?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}`);
+    const local = ["localhost", "127.0.0.1"].includes(location.hostname);
+    const socketOrigin = local ? "ws://localhost:8788" : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
+    const ws = new WebSocket(`${socketOrigin}/api/socket?room=${encodeURIComponent(code)}&username=${encodeURIComponent(username.trim())}`);
     socket.current = ws;
     ws.onopen = () => { setRoom(code); setStatus("Waiting for an opponent…"); };
     ws.onmessage = e => {
@@ -87,12 +88,14 @@ export default function ChessGame() {
       if (msg.type === "notice") setStatus(msg.message as string);
       if (msg.type === "reset") { setBoard(initialBoard()); setTurn("white"); }
     };
-    ws.onerror = () => setStatus("Couldn’t connect. Try again.");
+    ws.onerror = () => setStatus("Live connection failed. Restart with npm run dev, then refresh this page.");
     ws.onclose = () => setStatus("Table disconnected");
   }
   function createRoom() { connect(Math.random().toString(36).slice(2,8).toUpperCase()); }
   function clickSquare(i:number) {
-    if (!me || players.length < 2 || turn !== me) return;
+    if (!me) { setStatus("The live connection is not ready yet"); return; }
+    if (players.length < 2) { setStatus("Waiting for your opponent to join"); return; }
+    if (turn !== me) { setStatus("It’s your opponent’s turn"); return; }
     if (selected !== null && legal.includes(i)) {
       socket.current?.send(JSON.stringify({type:"move",from:selected,to:i})); return;
     }
