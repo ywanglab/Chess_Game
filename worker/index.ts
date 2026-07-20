@@ -21,7 +21,8 @@ interface Env {
 }
 
 type Client = { ws: WebSocket; username: string; color: "white" | "black" };
-type Room = { clients: Client[]; turn: "white" | "black"; moves: {from:number;to:number}[]; finished: boolean };
+type GameResult = { winner: string; loser: string; winnerColor: "white" | "black"; reason: "resignation" };
+type Room = { clients: Client[]; turn: "white" | "black"; moves: {from:number;to:number}[]; finished: boolean; result: GameResult | null };
 const rooms = new Map<string, Room>();
 
 async function ensureDb(env: Env) {
@@ -38,7 +39,11 @@ async function roomState(env: Env, code: string, clientId: string) {
   const names = [room.white, room.black].filter(Boolean) as string[];
   const profiles = await Promise.all(names.map(name => env.DB.prepare("SELECT username,rating FROM players WHERE username=?").bind(name).first<{username:string;rating:number}>()));
   const players = profiles.filter(Boolean).map((profile,index)=>({...profile,color:index===0?"white":"black"}));
-  return { type:"state", color: clientId === room.white_id ? "white" : "black", turn:room.turn, moves:JSON.parse(room.moves), status:room.status, players };
+  const winnerColor=room.status.startsWith("finished:")?room.status.slice(9) as "white"|"black":null;
+  const winner=winnerColor?players.find(item=>item.color===winnerColor):null;
+  const loser=winnerColor?players.find(item=>item.color!==winnerColor):null;
+  const result=winner&&loser?{winner:winner.username,loser:loser.username,winnerColor,reason:"resignation" as const}:null;
+  return { type:"state", color: clientId === room.white_id ? "white" : "black", turn:room.turn, moves:JSON.parse(room.moves) as {from:number;to:number}[], status:winnerColor?"finished":room.status, result, players };
 }
 
 async function roomApi(request: Request, env: Env) {
@@ -73,7 +78,22 @@ async function roomApi(request: Request, env: Env) {
     const moves=[...current.moves,{from,to}], next=current.turn==="white"?"black":"white";
     await env.DB.prepare("UPDATE live_rooms SET moves=?,turn=?,updated_at=? WHERE room=? AND turn=?").bind(JSON.stringify(moves),next,Date.now(),code,current.turn).run();
   } else if (action === "resign") {
-    await env.DB.prepare("UPDATE live_rooms SET status='finished',updated_at=? WHERE room=?").bind(Date.now(),code).run();
+    if (current.players.length < 2) return Response.json({error:"Wait for an opponent before resigning"},{status:409});
+    if (current.status === "finished") return Response.json(current);
+    const winnerColor=current.color==="white"?"black":"white";
+    const winner=current.players.find(item=>item.color===winnerColor);
+    const loser=current.players.find(item=>item.color===current.color);
+    if (!winner || !loser) return Response.json({error:"Both players must be present"},{status:409});
+    const claim=await env.DB.prepare("UPDATE live_rooms SET status=?,updated_at=? WHERE room=? AND status NOT LIKE 'finished:%'").bind(`finished:${winnerColor}`,Date.now(),code).run() as {meta?:{changes?:number}};
+    if ((claim.meta?.changes ?? 0) > 0) {
+      const white=current.players.find(item=>item.color==="white")!;
+      const black=current.players.find(item=>item.color==="black")!;
+      await env.DB.batch([
+        env.DB.prepare("UPDATE players SET rating=rating+16,wins=wins+1,games=games+1,updated_at=? WHERE username=?").bind(Date.now(),winner.username),
+        env.DB.prepare("UPDATE players SET rating=MAX(100,rating-16),losses=losses+1,games=games+1,updated_at=? WHERE username=?").bind(Date.now(),loser.username),
+        env.DB.prepare("INSERT INTO games (id,room,white,black,result,moves,finished_at) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(),code,white.username,black.username,winnerColor,JSON.stringify(current.moves),Date.now()),
+      ]);
+    }
   }
   return Response.json(await roomState(env,code,clientId));
 }
@@ -87,25 +107,27 @@ async function player(env: Env, username: string) {
 async function finish(env: Env, code: string, room: Room, winner: Client | undefined) {
   if (room.finished || room.clients.length < 2) return;
   room.finished = true;
-  const [white, black] = room.clients.sort((a,b)=>a.color === "white" ? -1 : 1);
+  const white = room.clients.find(client => client.color === "white")!;
+  const black = room.clients.find(client => client.color === "black")!;
   const loser = winner === white ? black : white;
   if (winner && loser) await env.DB.batch([
     env.DB.prepare("UPDATE players SET rating=rating+16,wins=wins+1,games=games+1,updated_at=? WHERE username=?").bind(Date.now(),winner.username),
     env.DB.prepare("UPDATE players SET rating=MAX(100, rating-16),losses=losses+1,games=games+1,updated_at=? WHERE username=?").bind(Date.now(),loser.username),
     env.DB.prepare("INSERT INTO games (id,room,white,black,result,moves,finished_at) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(),code,white.username,black.username,winner.color,JSON.stringify(room.moves),Date.now()),
   ]);
-  for (const c of room.clients) c.ws.send(JSON.stringify({type:"notice",message:winner ? `${winner.username} wins. Ratings updated.` : "Game drawn."}));
+  room.result=winner&&loser?{winner:winner.username,loser:loser.username,winnerColor:winner.color,reason:"resignation"}:null;
+  for (const c of room.clients) c.ws.send(JSON.stringify({type:"state",color:c.color,turn:room.turn,moves:room.moves,status:"finished",result:room.result,players:room.clients.map(x=>({username:x.username,rating:1200,color:x.color}))}));
 }
 
 async function socket(request: Request, env: Env) {
   if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected WebSocket", {status:426});
   const url = new URL(request.url), code=(url.searchParams.get("room")||"").toUpperCase().slice(0,6), username=(url.searchParams.get("username")||"").trim().slice(0,20);
   if (!/^[A-Z0-9]{6}$/.test(code) || !/^[\w -]{2,20}$/.test(username)) return new Response("Invalid room or username",{status:400});
-  const room=rooms.get(code)||{clients:[],turn:"white" as const,moves:[],finished:false};
+  const room=rooms.get(code)||{clients:[],turn:"white" as const,moves:[],finished:false,result:null};
   if(room.clients.length>=2) return new Response("Table is full",{status:409});
   const pair=new WebSocketPair(), client=pair[0], server=pair[1]; server.accept();
   const profile=await player(env,username), entry:Client={ws:server,username,color:room.clients.length===0?"white":"black"}; room.clients.push(entry); rooms.set(code,room);
-  const broadcastState=()=>room.clients.forEach(c=>c.ws.send(JSON.stringify({type:"state",color:c.color,players:room.clients.map(x=>({username:x.username,rating:x.username===username?(profile?.rating||1200):1200,color:x.color}))})));
+  const broadcastState=()=>room.clients.forEach(c=>c.ws.send(JSON.stringify({type:"state",color:c.color,turn:room.turn,moves:room.moves,status:room.finished?"finished":room.clients.length===2?"playing":"waiting",result:room.result,players:room.clients.map(x=>({username:x.username,rating:x.username===username?(profile?.rating||1200):1200,color:x.color}))})));
   broadcastState();
   server.addEventListener("message", async (event: MessageEvent)=>{ try { const msg=JSON.parse(String(event.data)); if(msg.type==="move"&&!room.finished&&room.clients.length===2&&entry.color===room.turn&&Number.isInteger(msg.from)&&Number.isInteger(msg.to)){room.moves.push({from:msg.from,to:msg.to});room.turn=room.turn==="white"?"black":"white";room.clients.forEach(c=>c.ws.send(JSON.stringify({type:"move",from:msg.from,to:msg.to,turn:room.turn})));} if(msg.type==="resign") await finish(env,code,room,room.clients.find(c=>c!==entry)); } catch {} });
   server.addEventListener("close",()=>{room.clients=room.clients.filter(c=>c!==entry);if(!room.clients.length)rooms.delete(code);else room.clients.forEach(c=>c.ws.send(JSON.stringify({type:"notice",message:"Opponent disconnected"})));});
