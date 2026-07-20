@@ -193,8 +193,8 @@ export default function ChessGame() {
 
   function chooseTheme(next:"light"|"dark") { setTheme(next); localStorage.setItem("castle-theme",next); }
   function chooseBoard(next:"forest"|"classic"|"midnight") { setBoardColor(next); localStorage.setItem("castle-board",next); }
-  const whitePlayer=players.find(player=>player.color==="white");
-  const blackPlayer=players.find(player=>player.color==="black");
+  const whitePlayer=players.find(player=>player.color==="white")??players[0];
+  const blackPlayer=players.find(player=>player.color==="black")??players[1];
   const recentMoves=history.slice(-5), recentStart=history.length-recentMoves.length;
 
   return <main data-theme={theme} data-board={boardColor}>

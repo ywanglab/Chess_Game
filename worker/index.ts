@@ -38,7 +38,11 @@ async function roomState(env: Env, code: string, clientId: string) {
   if (!room || (clientId !== room.white_id && clientId !== room.black_id)) return null;
   const names = [room.white, room.black].filter(Boolean) as string[];
   const profiles = await Promise.all(names.map(name => env.DB.prepare("SELECT username,rating FROM players WHERE username=?").bind(name).first<{username:string;rating:number}>()));
-  const players = profiles.filter(Boolean).map((profile,index)=>({...profile,color:index===0?"white":"black"}));
+  const ratings = new Map(profiles.filter((profile): profile is {username:string;rating:number} => Boolean(profile)).map(profile=>[profile.username,profile.rating]));
+  const players = [
+    {username:room.white,rating:ratings.get(room.white)??1200,color:"white" as const},
+    room.black?{username:room.black,rating:ratings.get(room.black)??1200,color:"black" as const}:null,
+  ].filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
   const winnerColor=room.status.startsWith("finished:")?room.status.slice(9) as "white"|"black":null;
   const winner=winnerColor?players.find(item=>item.color===winnerColor):null;
   const loser=winnerColor?players.find(item=>item.color!==winnerColor):null;
