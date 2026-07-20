@@ -62,6 +62,8 @@ export default function ChessGame() {
   const [me, setMe] = useState<Color | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [status, setStatus] = useState("Choose a name to get started");
+  const [theme, setTheme] = useState<"light"|"dark">("light");
+  const [boardColor, setBoardColor] = useState<"forest"|"classic"|"midnight">("forest");
   const [leaderboard, setLeaderboard] = useState<{username:string;rating:number;wins:number}[]>([]);
   const socket = useRef<WebSocket | null>(null);
   const poller = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -72,6 +74,7 @@ export default function ChessGame() {
   const legal = useMemo(() => selected === null ? [] : targets(board, selected), [board, selected]);
 
   useEffect(() => { fetch("/api/leaderboard").then(r=>r.json()).then(setLeaderboard).catch(()=>{}); }, []);
+  useEffect(()=>{const savedTheme=localStorage.getItem("castle-theme");const savedBoard=localStorage.getItem("castle-board");if(savedTheme==="dark")setTheme("dark");if(savedBoard==="classic"||savedBoard==="midnight")setBoardColor(savedBoard);},[]);
   useEffect(() => () => { socket.current?.close(); if(poller.current) clearInterval(poller.current); }, []);
 
   function receiveState(msg: Wire) {
@@ -169,7 +172,11 @@ export default function ChessGame() {
   }
   function resign() { if(confirm("Resign this game?")) { if(["localhost","127.0.0.1"].includes(location.hostname)) socket.current?.send(JSON.stringify({type:"resign"})); else void fetch("/api/room",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"resign",room,username:username.trim(),clientId:clientId.current})}); } }
 
-  return <main>
+  function chooseTheme(next:"light"|"dark") { setTheme(next); localStorage.setItem("castle-theme",next); }
+  function chooseBoard(next:"forest"|"classic"|"midnight") { setBoardColor(next); localStorage.setItem("castle-board",next); }
+
+  return <main data-theme={theme} data-board={boardColor}>
+    <style>{`main{min-height:100vh;background:var(--cream);color:var(--ink);transition:background .2s,color .2s}main[data-theme="dark"]{--ink:#edf2ea;--cream:#101712;--paper:#172019;--green:#294b37;--line:#3b493f}main[data-theme="dark"] .dek,main[data-theme="dark"] .panel p,main[data-theme="dark"] .playerline small{color:#aebbb1}main[data-theme="dark"] .join input,main[data-theme="dark"] .start-card input{background:#f5f3ec;color:#122218}main[data-board="forest"] .board .light{background:#e5dfcf}main[data-board="forest"] .board .dark{background:#55735f}main[data-board="classic"] .board .light{background:#f0d9b5}main[data-board="classic"] .board .dark{background:#b58863}main[data-board="midnight"] .board .light{background:#cad5e2}main[data-board="midnight"] .board .dark{background:#36516f}.appearance{border:1px solid var(--line);border-top:0;padding:20px}.appearance>small{font-size:9px;font-weight:900;letter-spacing:2px}.choice-row{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:13px 0}.choice-row button{border:1px solid var(--line);background:transparent;color:var(--ink);padding:9px;font-size:11px;font-weight:800}.choice-row button.active{background:var(--ink);color:var(--cream)}.swatches{display:flex;gap:10px}.swatches button{width:32px;height:32px;border:3px solid transparent;border-radius:50%;box-shadow:inset 0 0 0 15px var(--swatch-dark);background:linear-gradient(135deg,var(--swatch-light) 50%,var(--swatch-dark) 50%)}.swatches button.active{border-color:var(--lime);box-shadow:0 0 0 1px var(--ink)}.swatches .forest{--swatch-light:#e5dfcf;--swatch-dark:#55735f}.swatches .classic{--swatch-light:#f0d9b5;--swatch-dark:#b58863}.swatches .midnight{--swatch-light:#cad5e2;--swatch-dark:#36516f}`}</style>
     <nav><a className="brand" href="#" aria-label="Castle chess home"><span className="brand-mark" aria-hidden="true">♜</span><span className="brand-copy"><strong>CASTLE</strong><small>CHESS CLUB</small></span></a><div className="live"><i/> LIVE MULTIPLAYER</div></nav>
     <section className="shell">
       <header><p className="eyebrow">A BETTER WAY TO PLAY</p><h1>Your move.</h1><p className="dek">No accounts. No clutter. Just share a table code and play a proper game of chess.</p></header>
@@ -184,7 +191,7 @@ export default function ChessGame() {
           <div className="board" role="grid" aria-label="Chess board">{board.map((p,i)=><button aria-label={`square ${i}`} key={i} draggable={Boolean(p&&p.color===me&&turn===me)} onDragStart={()=>{dragFrom.current=i;setSelected(i);}} onDragOver={e=>e.preventDefault()} onDrop={()=>dropPiece(i)} onClick={()=>clickSquare(i)} className={`${(Math.floor(i/8)+i)%2?"dark":"light"} ${selected===i?"selected":""} ${legal.includes(i)?"target":""}`}><span>{p?glyph[p.color+p.type]:""}</span></button>)}</div>
           <div className="playerline"><div className="avatar mine">{username[0]?.toUpperCase()}</div><div><strong>{username} {me&&<em>YOU · {me.toUpperCase()}</em>}</strong><small>{players.find(p=>p.color===me)?.rating||1200}</small></div>{turn===me&&<span className="turn">YOUR TURN</span>}</div>
         </div>
-        <aside><div className="code"><small>TABLE CODE</small><strong>{room}</strong><button onClick={()=>navigator.clipboard.writeText(room)}>COPY</button></div><div className="panel"><h3>Game status</h3><p>{status}</p><p>{turn === me ? "Take your time. Your clock isn't running in the MVP." : "Your opponent is on the move."}</p></div><button className="resign" onClick={resign}>Resign game</button></aside>
+        <aside><div className="code"><small>TABLE CODE</small><strong>{room}</strong><button onClick={()=>navigator.clipboard.writeText(room)}>COPY</button></div><div className="panel"><h3>Game status</h3><p>{status}</p><p>{turn === me ? "Take your time. Your clock isn't running in the MVP." : "Your opponent is on the move."}</p></div><div className="appearance"><small>APPEARANCE</small><div className="choice-row" aria-label="Page theme"><button className={theme==="light"?"active":""} onClick={()=>chooseTheme("light")}>☀ Light</button><button className={theme==="dark"?"active":""} onClick={()=>chooseTheme("dark")}>◐ Dark</button></div><div className="swatches" aria-label="Board colors"><button aria-label="Forest board" className={`forest ${boardColor==="forest"?"active":""}`} onClick={()=>chooseBoard("forest")}/><button aria-label="Classic board" className={`classic ${boardColor==="classic"?"active":""}`} onClick={()=>chooseBoard("classic")}/><button aria-label="Midnight board" className={`midnight ${boardColor==="midnight"?"active":""}`} onClick={()=>chooseBoard("midnight")}/></div></div><button className="resign" onClick={resign}>Resign game</button></aside>
       </section>}
       <section className="leaders"><div><p className="eyebrow">THE CLUB</p><h2>Top players</h2></div><ol>{leaderboard.length?leaderboard.slice(0,5).map((p,i)=><li key={p.username}><span>{String(i+1).padStart(2,"0")}</span><strong>{p.username}</strong><small>{p.wins} wins</small><b>{p.rating}</b></li>):<li className="empty">Finish the first game to start the leaderboard.</li>}</ol></section>
     </section><footer><span>CASTLE CHESS · MVP</span><span>Built for friendly rivalry.</span></footer>
